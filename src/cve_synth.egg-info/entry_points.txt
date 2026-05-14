@@ -1,0 +1,2 @@
+[console_scripts]
+build-dataset = cve_synth.cli:main
