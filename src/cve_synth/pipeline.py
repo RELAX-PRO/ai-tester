@@ -19,11 +19,12 @@ class PipelineConfig:
     output_path: Path
     checkpoint_path: Path
     api_keys: list[str]
+    limit: int | None = None
     target_assembly: str = "x86-64"
     min_quality_score: float = 0.7
     min_confidence: float = 0.65
     prompt_version: str = "v1"
-    model_name: str = "deepseek-v4-pro-max"
+    model_name: str = "deepseek-v4-pro"
 
 
 def run_pipeline(config: PipelineConfig) -> dict[str, int]:
@@ -41,6 +42,9 @@ def run_pipeline(config: PipelineConfig) -> dict[str, int]:
     failed = 0
 
     for ingested in sources:
+        if config.limit is not None and processed >= config.limit:
+            break
+
         source = ingested.record
         if source.source_id in checkpoint.processed_source_ids:
             skipped += 1

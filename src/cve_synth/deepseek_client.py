@@ -10,7 +10,7 @@ from .extract import ExtractionResult
 from .models import AnalysisRecord, SourceRecord
 
 
-DEFAULT_MODEL = "deepseek-v4-pro-max"
+DEFAULT_MODEL = "deepseek-v4-pro"
 
 
 @dataclass(slots=True)
@@ -19,6 +19,8 @@ class DeepSeekConfig:
     model: str = DEFAULT_MODEL
     timeout_seconds: float = 120.0
     prompt_version: str = "v1"
+    reasoning_mode: str = "think_max"
+    endpoint_path: str = "/chat/completions"
 
 
 class DeepSeekRateLimitError(RuntimeError):
@@ -69,8 +71,12 @@ class DeepSeekClient:
             "model": self.config.model,
             "messages": self.build_messages(source, extraction, target_assembly),
             "temperature": 0.2,
+            "reasoning": {
+                "mode": self.config.reasoning_mode,
+            },
+            "reasoning_mode": self.config.reasoning_mode,
         }
-        response = self._request_json("/chat/completions", payload)
+        response = self._request_json(self.config.endpoint_path, payload)
         content = self._extract_content(response)
         parsed = self._parse_json_content(content)
         return AnalysisRecord(
@@ -135,9 +141,24 @@ class DeepSeekClient:
         return parsed
 
 
-def client_from_env(*, model: str = DEFAULT_MODEL, api_base: str | None = None, timeout_seconds: float = 120.0, prompt_version: str = "v1") -> DeepSeekClient:
+def client_from_env(
+    *,
+    model: str = DEFAULT_MODEL,
+    api_base: str | None = None,
+    timeout_seconds: float = 120.0,
+    prompt_version: str = "v1",
+    reasoning_mode: str = "think_max",
+    endpoint_path: str = "/chat/completions",
+) -> DeepSeekClient:
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not set")
-    config = DeepSeekConfig(api_base=api_base or os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com"), model=model, timeout_seconds=timeout_seconds, prompt_version=prompt_version)
+    config = DeepSeekConfig(
+        api_base=api_base or os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com"),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        prompt_version=prompt_version,
+        reasoning_mode=reasoning_mode,
+        endpoint_path=endpoint_path,
+    )
     return DeepSeekClient(api_key=api_key, config=config)

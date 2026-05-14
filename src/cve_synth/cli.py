@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import os
 import sys
 
 from .pipeline import PipelineConfig, run_pipeline
@@ -12,6 +13,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--input-dir", required=True, type=Path, help="Directory containing raw CVE reports and advisories")
     parser.add_argument("--output", required=True, type=Path, help="Output JSONL file")
     parser.add_argument("--checkpoint", required=True, type=Path, help="Checkpoint JSON file")
+    parser.add_argument("--limit", type=int, help="Optional maximum number of accepted records to write")
     parser.add_argument("--api-key", action="append", dest="api_keys", default=[], help="DeepSeek API key; may be provided multiple times")
     parser.add_argument("--api-keys-file", type=Path, help="Optional file with one API key per line")
     parser.add_argument("--target-assembly", default="x86-64", help="Target assembly family for fix synthesis")
@@ -26,6 +28,11 @@ def _load_api_keys(args: argparse.Namespace) -> list[str]:
     keys = [key.strip() for key in args.api_keys if key and key.strip()]
     if args.api_keys_file:
         keys.extend(line.strip() for line in args.api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip())
+    env_keys = [key.strip() for key in os.environ.get("DEEPSEEK_API_KEYS", "").split(",") if key.strip()]
+    keys.extend(env_keys)
+    env_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if env_key:
+        keys.append(env_key)
     if not keys:
         raise SystemExit("At least one API key is required via --api-key or --api-keys-file")
     return keys
@@ -38,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.output,
         checkpoint_path=args.checkpoint,
         api_keys=_load_api_keys(args),
+        limit=args.limit,
         target_assembly=args.target_assembly,
         min_quality_score=args.min_quality_score,
         min_confidence=args.min_confidence,

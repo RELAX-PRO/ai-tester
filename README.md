@@ -18,3 +18,16 @@ This repository currently contains the initial implementation scaffold:
 ```bash
 python -m cve_synth.cli --input-dir data/raw --output data/dataset.jsonl --checkpoint data/checkpoint.json
 ```
+
+## Fetch Raw Data
+
+```bash
+python -m cve_synth.fetch_data --output-dir data/raw
+```
+
+## Small-Scale Synthesis
+
+```bash
+python -m cve_synth.cli --input-dir data/raw --output data/dataset.jsonl --checkpoint data/checkpoint.json --limit 10
+```
+
