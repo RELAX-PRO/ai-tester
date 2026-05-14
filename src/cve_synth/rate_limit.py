@@ -63,9 +63,13 @@ class MultiKeyRateLimiter:
         with self._lock:
             state = self._find(api_key)
             state.failure_count += 1
-            if state.failure_count >= disable_after:
-                state.disabled = True
             state.available_at = monotonic() + state.cooldown_seconds
+
+    def release(self, api_key: str, cooldown_seconds: float | None = None) -> None:
+        with self._lock:
+            state = self._find(api_key)
+            delay = cooldown_seconds if cooldown_seconds and cooldown_seconds > 0 else state.min_interval_seconds
+            state.available_at = monotonic() + delay
 
     def snapshot(self) -> list[dict[str, object]]:
         with self._lock:
@@ -80,6 +84,12 @@ class MultiKeyRateLimiter:
                 }
                 for state in self._states
             ]
+
+    def seconds_until_next_available(self) -> float:
+        with self._lock:
+            now = monotonic()
+            next_available = min((state.available_at for state in self._states if not state.disabled), default=now)
+            return max(0.0, next_available - now)
 
     def _find(self, api_key: str) -> APIKeyState:
         for state in self._states:

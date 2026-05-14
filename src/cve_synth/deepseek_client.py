@@ -39,7 +39,8 @@ class DeepSeekClient:
     def build_messages(self, source: SourceRecord, extraction: ExtractionResult, target_assembly: str) -> list[dict[str, str]]:
         system = (
             "You are a cybersecurity dataset annotator. Produce structured, evidence-backed analysis only. "
-            "Do not provide exploit instructions. Focus on root cause, defensive reasoning, and assembly-level remediation notes."
+            "Do not provide exploit instructions. Focus on root cause, defensive reasoning, assembly-level remediation notes, "
+            "and analyst-facing vulnerability categorization tags."
         )
         user = {
             "source_id": source.source_id,
@@ -56,10 +57,16 @@ class DeepSeekClient:
                 "vulnerability_summary": "string",
                 "root_cause": "string",
                 "reasoning_chain": ["string"],
+                "tags": ["#MemoryCorruption", "#LogicError", "#Injection"],
                 "assembly_fix": "string",
                 "fix_strategy": "string",
                 "confidence": "number 0..1",
             },
+            "tagging_rules": [
+                "Return one or more short hash-prefixed tags.",
+                "Choose tags that categorize the vulnerability class, such as #MemoryCorruption, #LogicError, or #Injection.",
+                "Prefer the smallest set of tags that accurately describes the issue.",
+            ],
         }
         return [
             {"role": "system", "content": system},
@@ -83,6 +90,7 @@ class DeepSeekClient:
             vulnerability_summary=str(parsed["vulnerability_summary"]),
             root_cause=str(parsed["root_cause"]),
             reasoning_chain=[str(item) for item in parsed["reasoning_chain"]],
+            tags=self._normalize_tags(parsed.get("tags", [])),
             vulnerable_snippet=extraction.vulnerable_snippet,
             assembly_fix=str(parsed["assembly_fix"]),
             fix_strategy=str(parsed["fix_strategy"]),
@@ -138,7 +146,29 @@ class DeepSeekClient:
             raise ValueError(f"DeepSeek response missing required fields: {sorted(missing)}")
         if not isinstance(parsed["reasoning_chain"], list):
             raise ValueError("reasoning_chain must be a list")
+        if "tags" in parsed and not isinstance(parsed["tags"], list):
+            raise ValueError("tags must be a list when present")
         return parsed
+
+    @staticmethod
+    def _normalize_tags(tags: Any) -> list[str]:
+        if not isinstance(tags, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            cleaned = tag.strip()
+            if not cleaned:
+                continue
+            if not cleaned.startswith("#"):
+                cleaned = f"#{cleaned.lstrip('#')}"
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        return normalized
 
 
 def client_from_env(

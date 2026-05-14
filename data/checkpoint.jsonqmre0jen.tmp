@@ -1,0 +1,22 @@
+{
+  "failed_source_ids": [
+    "GHSA-27qc-m5gf-jv5r",
+    "GHSA-2rc4-7jc6-qffh",
+    "GHSA-3xcq-8mjw-h6mx",
+    "GHSA-7mqx-wwh4-f9fw",
+    "GHSA-9mhv-8h52-q7q2",
+    "GHSA-9vcr-g537-3w5v",
+    "GHSA-ffg9-j72f-j6xm",
+    "GHSA-hvp3-26wx-g2w4",
+    "GHSA-j8h8-75h3-jg53",
+    "GHSA-mxmp-wr3w-rvqx",
+    "GHSA-pcw7-5633-82vv",
+    "GHSA-q58j-g3f4-h26h",
+    "GHSA-qf4g-9fqq-mmm7",
+    "GHSA-rjg2-95x7-8qmx",
+    "GHSA-wmmv-vvg5-993q",
+    "GHSA-x67p-9m2r-fxqv"
+  ],
+  "last_output_index": 0,
+  "processed_source_ids": []
+}

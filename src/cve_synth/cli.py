@@ -1,18 +1,57 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import os
+from pathlib import Path
 import sys
 
-from .pipeline import PipelineConfig, run_pipeline
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from cve_synth.pipeline import PipelineConfig, run_pipeline
+else:
+    from .pipeline import PipelineConfig, run_pipeline
+
+
+DEFAULT_INPUT_DIR = Path("data/raw")
+DEFAULT_OUTPUT_PATH = Path("data/dataset.jsonl")
+DEFAULT_CHECKPOINT_PATH = Path("data/checkpoint.json")
+
+
+def _load_env_file(path: Path) -> None:
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _load_dotenv_files() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    cwd_env_files = [Path.cwd() / ".env", Path.cwd() / ".env.local"]
+    loaded_any_cwd_env = False
+
+    for env_path in cwd_env_files:
+        if env_path.exists():
+            _load_env_file(env_path)
+            loaded_any_cwd_env = True
+
+    if loaded_any_cwd_env:
+        return
+
+    for env_path in (project_root / ".env", project_root / ".env.local"):
+        if env_path.exists():
+            _load_env_file(env_path)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a synthetic CVE fine-tuning dataset.")
-    parser.add_argument("--input-dir", required=True, type=Path, help="Directory containing raw CVE reports and advisories")
-    parser.add_argument("--output", required=True, type=Path, help="Output JSONL file")
-    parser.add_argument("--checkpoint", required=True, type=Path, help="Checkpoint JSON file")
+    parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="Directory containing raw CVE reports and advisories")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Output JSONL file")
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT_PATH, help="Checkpoint JSON file")
     parser.add_argument("--limit", type=int, help="Optional maximum number of accepted records to write")
     parser.add_argument("--api-key", action="append", dest="api_keys", default=[], help="DeepSeek API key; may be provided multiple times")
     parser.add_argument("--api-keys-file", type=Path, help="Optional file with one API key per line")
@@ -31,20 +70,22 @@ def _load_api_keys(args: argparse.Namespace) -> list[str]:
     env_keys = [key.strip() for key in os.environ.get("DEEPSEEK_API_KEYS", "").split(",") if key.strip()]
     keys.extend(env_keys)
     env_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if env_key:
+    if env_key and env_key not in keys:
         keys.append(env_key)
-    if not keys:
-        raise SystemExit("At least one API key is required via --api-key or --api-keys-file")
     return keys
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv_files()
     args = parse_args(argv)
+    api_keys = _load_api_keys(args)
+    if not api_keys:
+        raise SystemExit("No DeepSeek API key found. Create a .env file with DEEPSEEK_API_KEY or pass --api-key/--api-keys-file.")
     config = PipelineConfig(
         input_dir=args.input_dir,
         output_path=args.output,
         checkpoint_path=args.checkpoint,
-        api_keys=_load_api_keys(args),
+        api_keys=api_keys,
         limit=args.limit,
         target_assembly=args.target_assembly,
         min_quality_score=args.min_quality_score,

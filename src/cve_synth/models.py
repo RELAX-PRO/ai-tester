@@ -65,6 +65,7 @@ class AnalysisRecord:
     confidence: float
     model_name: str
     prompt_version: str
+    tags: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
@@ -77,6 +78,9 @@ class AnalysisRecord:
         self.prompt_version = _ensure_str(self.prompt_version, "prompt_version")
         if not self.reasoning_chain or not all(isinstance(step, str) and step.strip() for step in self.reasoning_chain):
             raise ValueError("reasoning_chain must contain non-empty strings")
+        if not isinstance(self.tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in self.tags):
+            raise ValueError("tags must be a list of non-empty strings")
+        self.tags = [tag.strip() for tag in self.tags]
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
 
@@ -85,6 +89,7 @@ class AnalysisRecord:
             "vulnerability_summary": self.vulnerability_summary,
             "root_cause": self.root_cause,
             "reasoning_chain": self.reasoning_chain,
+            "tags": self.tags,
             "vulnerable_snippet": self.vulnerable_snippet,
             "assembly_fix": self.assembly_fix,
             "fix_strategy": self.fix_strategy,
@@ -106,6 +111,9 @@ class DatasetRecord:
 
     def __post_init__(self) -> None:
         self.record_id = _ensure_str(self.record_id, "record_id")
+        if not isinstance(self.tags, list) or any(not isinstance(tag, str) or not tag.strip() for tag in self.tags):
+            raise ValueError("tags must be a list of non-empty strings")
+        self.tags = [tag.strip() for tag in self.tags]
         if not 0.0 <= self.quality_score <= 1.0:
             raise ValueError("quality_score must be between 0 and 1")
 

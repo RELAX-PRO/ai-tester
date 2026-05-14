@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 import json
 
 
@@ -40,8 +39,6 @@ class CheckpointStore:
 
     def save(self, state: CheckpointState) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=self.path.parent, prefix=self.path.name, suffix=".tmp") as temp_file:
-            json.dump(state.to_dict(), temp_file, indent=2, sort_keys=True)
-            temp_file.write("\n")
-            temp_path = Path(temp_file.name)
-        temp_path.replace(self.path)
+        with self.path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(state.to_dict(), handle, indent=2, sort_keys=True)
+            handle.write("\n")

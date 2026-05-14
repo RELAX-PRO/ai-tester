@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 from .checkpoint import CheckpointStore
 from .deepseek_client import DeepSeekClient, DeepSeekConfig, DeepSeekRateLimitError
@@ -66,6 +67,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, int]:
                 evidence_spans=extraction.evidence_spans,
                 analysis=analysis,
                 record_id=f"{source.source_id}:{len(checkpoint.processed_source_ids) + 1}",
+                tags=analysis.tags,
                 quality_score=0.0,
             )
             candidate.quality_score = score_record(candidate)
@@ -104,11 +106,17 @@ def _analyze_with_rotation(
     target_assembly: str,
     deepseek_config: DeepSeekConfig,
 ):
-    key_attempts = max(1, len(limiter.snapshot()) * 2)
     last_error: Exception | None = None
 
-    for _ in range(key_attempts):
-        api_key = limiter.acquire()
+    for _ in range(max(1, len(limiter.snapshot()) * 2)):
+        try:
+            api_key = limiter.acquire()
+        except RuntimeError:
+            sleep_for = limiter.seconds_until_next_available()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            api_key = limiter.acquire()
+
         client = DeepSeekClient(api_key=api_key, config=deepseek_config)
         try:
             analysis = client.analyze(source, extraction, target_assembly=target_assembly)
