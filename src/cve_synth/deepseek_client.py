@@ -42,6 +42,12 @@ class DeepSeekClient:
             "Do not provide exploit instructions. Focus on root cause, defensive reasoning, assembly-level remediation notes, "
             "and analyst-facing vulnerability categorization tags."
         )
+        # Enforce strict JSON-only responses to avoid parsing errors
+        system += (
+            " Always respond with a single valid JSON object matching the requested schema. "
+            "Do NOT include markdown, code fences, explanatory text, or any extra characters."
+        )
+        )
         user = {
             "source_id": source.source_id,
             "source_type": source.source_type,
@@ -77,12 +83,14 @@ class DeepSeekClient:
         payload = {
             "model": self.config.model,
             "messages": self.build_messages(source, extraction, target_assembly),
+            "response_format": {"type": "json_object"},
             "temperature": 0.2,
             "reasoning": {
                 "mode": self.config.reasoning_mode,
             },
             "reasoning_mode": self.config.reasoning_mode,
         }
+        print(f"[DEBUG] Sending payload for {source.source_id} (Length: {len(str(payload))} chars)")
         response = self._request_json(self.config.endpoint_path, payload)
         content = self._extract_content(response)
         parsed = self._parse_json_content(content)

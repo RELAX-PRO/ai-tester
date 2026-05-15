@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from types import SimpleNamespace
+from unittest import mock
+from urllib import error
+
+import pytest
 
 from cve_synth.cli import _load_api_keys, _load_dotenv_files, parse_args
 from cve_synth.checkpoint import CheckpointState, CheckpointStore
 from cve_synth.extract import extract_evidence
+from cve_synth.groq_client import GroqClient, GroqConfig
 from cve_synth.models import AnalysisRecord, DatasetRecord, SourceRecord
 from cve_synth.quality import is_acceptable, score_record
 from cve_synth.rate_limit import MultiKeyRateLimiter
@@ -106,3 +112,52 @@ def test_tags_are_serialized(tmp_path) -> None:
     decoded = json.loads((tmp_path / "dataset.jsonl").read_text(encoding="utf-8").strip())
     assert decoded["tags"] == ["#MemoryCorruption"]
     assert decoded["analysis"]["tags"] == ["#MemoryCorruption"]
+
+
+def test_groq_request_sets_identity_headers() -> None:
+    client = GroqClient(api_key="test-key", config=GroqConfig(user_agent="cve-synth/0.1.0"))
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"choices": [{"message": {"content": "{}"}}]}'
+
+    captured_request: dict[str, object] = {}
+
+    def fake_urlopen(req, timeout):
+        captured_request["req"] = req
+        captured_request["timeout"] = timeout
+        return FakeResponse()
+
+    with mock.patch("cve_synth.groq_client.request.urlopen", side_effect=fake_urlopen):
+        response = client._request_json("/chat/completions", {"model": "m", "messages": []})
+
+    assert response["choices"][0]["message"]["content"] == "{}"
+    assert captured_request["timeout"] == pytest.approx(120.0)
+    headers = dict(captured_request["req"].header_items())
+    assert headers["Accept"] == "application/json"
+    assert headers["Content-type"] == "application/json"
+    assert headers["User-agent"] == "cve-synth/0.1.0"
+    assert headers["Authorization"] == "Bearer test-key"
+
+
+def test_groq_request_surfaces_waf_block_hint() -> None:
+    client = GroqClient(api_key="test-key")
+
+    def fake_urlopen(req, timeout):
+        raise error.HTTPError(
+            url=req.full_url,
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=BytesIO(b"Request blocked by WAF"),
+        )
+
+    with mock.patch("cve_synth.groq_client.request.urlopen", side_effect=fake_urlopen):
+        with pytest.raises(RuntimeError, match="possible WAF/bot detection"):
+            client._request_json("/chat/completions", {"model": "m", "messages": []})

@@ -10,7 +10,7 @@ from .extract import ExtractionResult
 from .models import AnalysisRecord, SourceRecord
 
 
-DEFAULT_MODEL = "deepseek-r1-distill-llama-70b"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 TOTAL_TOKEN_BUDGET = 4000  # ~16,000 characters at 4 chars/token
 CHARS_PER_TOKEN = 4
 
@@ -22,6 +22,7 @@ class GroqConfig:
     timeout_seconds: float = 120.0
     prompt_version: str = "v1"
     endpoint_path: str = "/chat/completions"
+    user_agent: str = "cve-synth/0.1.0"
 
 
 class GroqRateLimitError(RuntimeError):
@@ -63,6 +64,11 @@ class GroqClient:
             "You are a cybersecurity dataset annotator. Produce structured, evidence-backed analysis only. "
             "Do not provide exploit instructions. Focus on root cause, defensive reasoning, assembly-level remediation notes, "
             "and analyst-facing vulnerability categorization tags."
+        )
+        # Enforce strict JSON-only responses from the model to avoid parsing issues
+        system += (
+            " Always respond with a single valid JSON object matching the requested schema. "
+            "Do NOT include markdown, code fences, explanatory text, or any extra characters."
         )
 
         # Aggressive truncation for Groq's 8000 TPM constraint
@@ -116,8 +122,10 @@ class GroqClient:
         payload = {
             "model": self.config.model,
             "messages": self.build_messages(source, extraction, target_assembly),
+            "response_format": {"type": "json_object"},
             "temperature": 0.2,
         }
+        print(f"[DEBUG] Sending payload for {source.source_id} (Length: {len(str(payload))} chars)")
         response = self._request_json(self.config.endpoint_path, payload)
         content = self._extract_content(response)
         parsed = self._parse_json_content(content)
@@ -138,8 +146,10 @@ class GroqClient:
         data = json.dumps(payload).encode("utf-8")
         url = self.config.api_base.rstrip("/") + path
         req = request.Request(url, data=data, method="POST")
+        req.add_header("Accept", "application/json")
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", f"Bearer {self.api_key}")
+        req.add_header("User-Agent", self.config.user_agent)
         try:
             with request.urlopen(req, timeout=self.config.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -154,6 +164,12 @@ class GroqClient:
                     except ValueError:
                         retry_after_seconds = None
                 raise GroqRateLimitError(f"Groq rate limit exceeded: {body}", retry_after_seconds=retry_after_seconds) from exc
+            if exc.code == 403 and self._looks_like_waf_block(body):
+                raise RuntimeError(
+                    "Groq request was blocked by an upstream protection layer (possible WAF/bot detection). "
+                    "Try a different egress IP, confirm the API key and account are allowed, or contact Groq support. "
+                    f"HTTP 403 body: {body}"
+                ) from exc
             raise RuntimeError(f"Groq request failed with HTTP {exc.code}: {body}") from exc
 
     @staticmethod
@@ -204,6 +220,22 @@ class GroqClient:
             seen.add(cleaned)
             normalized.append(cleaned)
         return normalized
+
+    @staticmethod
+    def _looks_like_waf_block(body: str) -> bool:
+        lowered = body.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "waf",
+                "bot",
+                "automated",
+                "access denied",
+                "request blocked",
+                "cloudflare",
+                "security check",
+            )
+        )
 
 
 def client_from_env(

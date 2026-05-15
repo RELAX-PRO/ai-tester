@@ -59,7 +59,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-quality-score", type=float, default=0.7)
     parser.add_argument("--min-confidence", type=float, default=0.65)
     parser.add_argument("--prompt-version", default="v1")
-    parser.add_argument("--model-name", default="deepseek-r1-distill-llama-70b")
+    parser.add_argument("--model-name", default="openai/gpt-oss-120b")
     return parser.parse_args(argv)
 
 

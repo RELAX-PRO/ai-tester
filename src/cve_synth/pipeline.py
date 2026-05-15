@@ -25,7 +25,7 @@ class PipelineConfig:
     min_quality_score: float = 0.7
     min_confidence: float = 0.65
     prompt_version: str = "v1"
-    model_name: str = "deepseek-r1-distill-llama-70b"
+    model_name: str = "openai/gpt-oss-120b"
 
 
 def run_pipeline(config: PipelineConfig) -> dict[str, int]:
@@ -83,6 +83,7 @@ def run_pipeline(config: PipelineConfig) -> dict[str, int]:
             checkpoint.last_output_index += 1
             checkpoint_store.save(checkpoint)
             written += 1
+            print(f"[SUCCESS] Wrote {source.source_id} to {config.output_path}")
             processed += 1
         except Exception as e:
             # تمت إضافة سطر الطباعة هذا لكشف العلة الأساسية
