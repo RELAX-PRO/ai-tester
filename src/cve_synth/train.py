@@ -15,6 +15,10 @@ Usage:
 
 from __future__ import annotations
 
+# CRITICAL: Import Unsloth FIRST before torch, transformers, or trl
+# to allow Unsloth to apply monkey-patches to attention layers.
+from unsloth import FastLanguageModel, is_bfloat16_supported
+
 import argparse
 import json
 from pathlib import Path
@@ -28,21 +32,20 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 from trl import SFTTrainer
-from unsloth import FastLanguageModel, is_bfloat16_supported
 
 
 # ============================================================================
 # Constants
 # ============================================================================
 
-MODEL_NAME = "unsloth/gemma-2-9b-it-bnb-4bit"
+MODEL_NAME = "unsloth/Qwen2.5-Coder-7B-Instruct"
 MAX_SEQ_LENGTH = 4096
 GRADIENT_CHECKPOINTING_TECHNIQUE = "unsloth"
 
 # LoRA Configuration
-LORA_R = 16
-LORA_ALPHA = 16
-LORA_DROPOUT = 0.0
+LORA_R = 32
+LORA_ALPHA = 64
+LORA_DROPOUT = 0.0  # Must be 0.0 for Unsloth fast-path CUDA kernels; non-zero forces fallback to slower layers
 LORA_BIAS = "none"
 LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -73,7 +76,7 @@ def load_jsonl_dataset(jsonl_path: str | Path) -> Dataset:
 
 def formatting_prompts_func(examples: dict[str, Any]) -> dict[str, list[str]]:
     """
-    Format dataset records into Gemma-2 chat templates with Chain-of-Thought structure.
+    Format dataset records into Qwen chat templates with Chain-of-Thought structure.
     
     Expected input structure:
     {
@@ -93,56 +96,51 @@ def formatting_prompts_func(examples: dict[str, Any]) -> dict[str, list[str]]:
     """
     texts = []
     
-    for record in examples["records"]:
-        # Extract components
-        analysis = record.get("analysis", {})
-        source = record.get("source", {})
-        
-        vulnerability_summary = analysis.get("vulnerability_summary", "")
-        root_cause = analysis.get("root_cause", "")
-        tags = analysis.get("tags", [])
-        reasoning_chain = analysis.get("reasoning_chain", [])
-        assembly_fix = analysis.get("assembly_fix", "")
-        
-        cve_id = source.get("cve_id", "UNKNOWN")
-        title = source.get("title", "")
-        
-        # Build the prompt using Gemma-2 chat format
-        # Gemma-2 uses <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n...<end_of_turn>
+    # The dataset produced by cve_synth is flat (top-level fields), not nested under `analysis`.
+    # Support both flat and nested schemas for backward compatibility.
+    for record in examples.get("records", []):
+        # Prefer flat fields if present, otherwise fall back to nested `analysis` object
+        if "vulnerability_summary" in record:
+            vuln_summary = record.get("vulnerability_summary", "")
+            root_cause = record.get("root_cause", "")
+            tags = record.get("tags", []) or []
+            reasoning_chain = record.get("reasoning_chain", []) or []
+            assembly_fix = record.get("assembly_fix", "")
+            cve_id = record.get("cve_id", record.get("source_id", "UNKNOWN"))
+        else:
+            analysis = record.get("analysis", {})
+            vuln_summary = analysis.get("vulnerability_summary", "")
+            root_cause = analysis.get("root_cause", "")
+            tags = analysis.get("tags", []) or []
+            reasoning_chain = analysis.get("reasoning_chain", []) or []
+            assembly_fix = analysis.get("assembly_fix", "")
+            source = record.get("source", {})
+            cve_id = source.get("cve_id", record.get("source_id", "UNKNOWN"))
+
+        # Build prompt using Qwen's chat template: <|im_start|>...<|im_end|>
         prompt = (
-            f"<start_of_turn>user\n"
-            f"Analyze the following security vulnerability and provide structured reasoning:\n\n"
+            f"<|im_start|>user\n"
+            f"Analyze the following security vulnerability and provide a detailed reasoning process inside <thought> tags, then the final analysis.\n\n"
             f"CVE ID: {cve_id}\n"
-            f"Title: {title}\n"
-            f"Summary: {vulnerability_summary}\n\n"
-            f"Please provide:\n"
-            f"1. Root cause analysis\n"
-            f"2. Step-by-step reasoning (chain of thought)\n"
-            f"3. Vulnerability classification tags\n"
-            f"4. Assembly-level fix recommendations\n"
-            f"<end_of_turn>\n"
+            f"Summary: {vuln_summary}\n"
+            f"Root Cause Indication: {root_cause}\n"
+            f"<|im_end|>\n"
         )
-        
-        # Build the expected response with explicit chain-of-thought structure
-        reasoning_text = "\n".join([f"{i+1}. {step}" for i, step in enumerate(reasoning_chain)])
+
+        # Convert reasoning_chain list to bullet points inside <thought>
+        reasoning_text = "\n".join([f"- {step}" for step in reasoning_chain]) if reasoning_chain else "-"
         tags_text = ", ".join(tags) if tags else "#Unknown"
-        
+
         response = (
-            f"<start_of_turn>model\n"
-            f"**Root Cause Analysis:**\n"
-            f"{root_cause}\n\n"
-            f"**Chain of Thought Reasoning:**\n"
-            f"{reasoning_text}\n\n"
-            f"**Vulnerability Classification:**\n"
-            f"Tags: {tags_text}\n\n"
-            f"**Assembly-Level Fix:**\n"
-            f"{assembly_fix}\n"
-            f"<end_of_turn>"
+            f"<|im_start|>assistant\n"
+            f"<thought>\n{reasoning_text}\n</thought>\n\n"
+            f"**Vulnerability Analysis:**\n"
+            f"- Classification Tags: {tags_text}\n"
+            f"- Assembly-level Fix:\n{assembly_fix}\n"
+            f"<|im_end|>"
         )
-        
-        # Combine prompt and response
-        full_text = prompt + response
-        texts.append(full_text)
+
+        texts.append(prompt + response)
     
     return {"text": texts}
 
@@ -202,7 +200,7 @@ def initialize_model_and_tokenizer(
 def train(
     dataset_path: str | Path,
     output_dir: str | Path,
-    num_train_epochs: int = 3,
+    num_train_epochs: int = 1,
     per_device_train_batch_size: int = 2,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 2e-4,
@@ -261,11 +259,16 @@ def train(
     print(f"[INFO] Effective batch size: {effective_batch_size}")
     print(f"       (per_device={per_device_train_batch_size}, accumulation={gradient_accumulation_steps})")
     
+    # Calculate warmup steps (TRL v0.8+: warmup_ratio deprecated, use warmup_steps)
+    total_steps = (len(formatted_dataset) * num_train_epochs) // effective_batch_size
+    warmup_steps = int(total_steps * 0.03)  # 3% warmup
+    print(f"[INFO] Total training steps: {total_steps}, Warmup steps: {warmup_steps}")
+    
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=per_device_train_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
-        warmup_ratio=warmup_ratio,
+        warmup_steps=warmup_steps,  # TRL v0.8+ uses warmup_steps instead of warmup_ratio
         num_train_epochs=num_train_epochs,
         learning_rate=learning_rate,
         fp16=not is_bfloat16_supported(),
@@ -275,7 +278,7 @@ def train(
         seed=42,
         save_steps=save_steps,
         save_total_limit=save_total_limit,
-        logging_dir=str(output_dir / "logs"),
+        # logging_dir removed to avoid deprecation warning; TensorBoard logs handled via env var or default
         logging_first_step=True,
         report_to=["tensorboard"],
         push_to_hub=False,
@@ -285,7 +288,7 @@ def train(
     print(f"\n[STEP 5] Initializing SFT trainer")
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,  # TRL v0.8+: use processing_class instead of deprecated tokenizer argument
         train_dataset=formatted_dataset,
         dataset_text_field="text",
         max_seq_length=MAX_SEQ_LENGTH,
@@ -300,6 +303,25 @@ def train(
     print(f"         Learning rate: {learning_rate}")
     print(f"         Output directory: {output_dir}")
     print(f"\n" + "=" * 80)
+    print(f"[READY] Training {MODEL_NAME} with {len(formatted_dataset)} samples.")
+    
+    # === UNSLOTH LOSS COMPATIBILITY PATCH ===
+    # Save the original method
+    _original_unsloth_step = trainer.training_step
+
+    def _patched_training_step(model, inputs, *args, **kwargs):
+        # Call the original step
+        loss = _original_unsloth_step(model, inputs, *args, **kwargs)
+        # If loss is a scalar (int/float), wrap it as a differentiable tensor
+        if isinstance(loss, (int, float)):
+            loss = torch.tensor(loss, requires_grad=True, device=model.device)
+        return loss
+
+    # Apply the patch to the trainer instance
+    import types
+    trainer.training_step = types.MethodType(lambda self, model, inputs, *a, **kw: _patched_training_step(model, inputs, *a, **kw), trainer)
+    print("[PATCH] Applied loss scalar compatibility fix.")
+    # === END PATCH ===
     
     trainer.train()
     
@@ -360,7 +382,7 @@ def main() -> None:
     parser.add_argument(
         "--num-train-epochs",
         type=int,
-        default=3,
+        default=1,
         help="Number of training epochs",
     )
     parser.add_argument(
