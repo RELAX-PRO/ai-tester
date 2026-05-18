@@ -55,15 +55,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="Optional maximum number of accepted records to write")
     parser.add_argument("--api-key", action="append", dest="api_keys", default=[], help="Groq API key; may be provided multiple times")
     parser.add_argument("--api-keys-file", type=Path, help="Optional file with one API key per line")
+    parser.add_argument("--gemini-api-key", action="append", dest="gemini_api_keys", default=[], help="Gemini API key; may be provided multiple times")
+    parser.add_argument("--gemini-api-keys-file", type=Path, help="Optional file with one Gemini API key per line")
+    parser.add_argument("--deepseek-api-key", action="append", dest="deepseek_api_keys", default=[], help="DeepSeek API key; may be provided multiple times")
+    parser.add_argument("--deepseek-api-keys-file", type=Path, help="Optional file with one DeepSeek API key per line")
     parser.add_argument("--target-assembly", default="x86-64", help="Target assembly family for fix synthesis")
     parser.add_argument("--min-quality-score", type=float, default=0.7)
     parser.add_argument("--min-confidence", type=float, default=0.65)
     parser.add_argument("--prompt-version", default="v1")
     parser.add_argument("--model-name", default="openai/gpt-oss-120b")
+    parser.add_argument("--gemini-model-name", default="gemini-2.5-pro")
+    parser.add_argument("--deepseek-model-name", default="deepseek-v4-pro")
+    parser.add_argument("--provider-priority", default="groq,gemini,deepseek", help="Comma-separated provider order")
     return parser.parse_args(argv)
 
 
-def _load_api_keys(args: argparse.Namespace) -> list[str]:
+def _load_groq_api_keys(args: argparse.Namespace) -> list[str]:
     keys = [key.strip() for key in args.api_keys if key and key.strip()]
     if args.api_keys_file:
         keys.extend(line.strip() for line in args.api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip())
@@ -73,7 +80,11 @@ def _load_api_keys(args: argparse.Namespace) -> list[str]:
     env_key = os.environ.get("GROQ_API_KEY", "").strip()
     if env_key and env_key not in keys:
         keys.append(env_key)
-    # Fallback to DeepSeek for backward compatibility
+    return keys
+
+
+def _load_api_keys(args: argparse.Namespace) -> list[str]:
+    keys = _load_groq_api_keys(args)
     if not keys:
         env_keys = [key.strip() for key in os.environ.get("DEEPSEEK_API_KEYS", "").split(",") if key.strip()]
         keys.extend(env_keys)
@@ -83,23 +94,56 @@ def _load_api_keys(args: argparse.Namespace) -> list[str]:
     return keys
 
 
+def _load_gemini_api_keys(args: argparse.Namespace) -> list[str]:
+    keys = [key.strip() for key in args.gemini_api_keys if key and key.strip()]
+    if args.gemini_api_keys_file:
+        keys.extend(line.strip() for line in args.gemini_api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip())
+    env_keys = [key.strip() for key in os.environ.get("GEMINI_API_KEYS", "").split(",") if key.strip()]
+    keys.extend(env_keys)
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key and env_key not in keys:
+        keys.append(env_key)
+    return keys
+
+
+def _load_deepseek_api_keys(args: argparse.Namespace) -> list[str]:
+    keys = [key.strip() for key in args.deepseek_api_keys if key and key.strip()]
+    if args.deepseek_api_keys_file:
+        keys.extend(line.strip() for line in args.deepseek_api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip())
+    env_keys = [key.strip() for key in os.environ.get("DEEPSEEK_API_KEYS", "").split(",") if key.strip()]
+    keys.extend(env_keys)
+    env_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if env_key and env_key not in keys:
+        keys.append(env_key)
+    return keys
+
+
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv_files()
     args = parse_args(argv)
-    api_keys = _load_api_keys(args)
-    if not api_keys:
-        raise SystemExit("No Groq API key found. Create a .env file with GROQ_API_KEYS or pass --api-key/--api-keys-file.")
+    groq_api_keys = _load_groq_api_keys(args)
+    gemini_api_keys = _load_gemini_api_keys(args)
+    deepseek_api_keys = _load_deepseek_api_keys(args)
+    if not (groq_api_keys or gemini_api_keys or deepseek_api_keys):
+        raise SystemExit(
+            "No provider API keys found. Create a .env file with GROQ_API_KEYS, GEMINI_API_KEY, or DEEPSEEK_API_KEY, or pass the matching CLI flags."
+        )
     config = PipelineConfig(
         input_dir=args.input_dir,
         output_path=args.output,
         checkpoint_path=args.checkpoint,
-        api_keys=api_keys,
+        api_keys=groq_api_keys,
         limit=args.limit,
         target_assembly=args.target_assembly,
         min_quality_score=args.min_quality_score,
         min_confidence=args.min_confidence,
         prompt_version=args.prompt_version,
         model_name=args.model_name,
+        provider_priority=[item.strip() for item in args.provider_priority.split(",") if item.strip()],
+        gemini_api_keys=gemini_api_keys,
+        deepseek_api_keys=deepseek_api_keys,
+        gemini_model_name=args.gemini_model_name,
+        deepseek_model_name=args.deepseek_model_name,
     )
     result = run_pipeline(config)
     print(result)

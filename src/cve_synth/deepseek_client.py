@@ -8,6 +8,7 @@ from urllib import error, request
 
 from .extract import ExtractionResult
 from .models import AnalysisRecord, SourceRecord
+from .prompting import build_teacher_messages
 
 
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -37,47 +38,7 @@ class DeepSeekClient:
         self.config = config or DeepSeekConfig()
 
     def build_messages(self, source: SourceRecord, extraction: ExtractionResult, target_assembly: str) -> list[dict[str, str]]:
-        system = (
-            "You are a cybersecurity dataset annotator. Produce structured, evidence-backed analysis only. "
-            "Do not provide exploit instructions. Focus on root cause, defensive reasoning, assembly-level remediation notes, "
-            "and analyst-facing vulnerability categorization tags."
-        )
-        # Enforce strict JSON-only responses to avoid parsing errors
-        system += (
-            " Always respond with a single valid JSON object matching the requested schema. "
-            "Do NOT include markdown, code fences, explanatory text, or any extra characters."
-        )
-        )
-        user = {
-            "source_id": source.source_id,
-            "source_type": source.source_type,
-            "title": source.title,
-            "cve_id": source.cve_id,
-            "ghsa_id": source.ghsa_id,
-            "severity": source.severity,
-            "raw_text": source.raw_text,
-            "vulnerable_snippet": extraction.vulnerable_snippet,
-            "surrounding_context": extraction.surrounding_context,
-            "target_assembly": target_assembly,
-            "output_schema": {
-                "vulnerability_summary": "string",
-                "root_cause": "string",
-                "reasoning_chain": ["string"],
-                "tags": ["#MemoryCorruption", "#LogicError", "#Injection"],
-                "assembly_fix": "string",
-                "fix_strategy": "string",
-                "confidence": "number 0..1",
-            },
-            "tagging_rules": [
-                "Return one or more short hash-prefixed tags.",
-                "Choose tags that categorize the vulnerability class, such as #MemoryCorruption, #LogicError, or #Injection.",
-                "Prefer the smallest set of tags that accurately describes the issue.",
-            ],
-        }
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(user, ensure_ascii=True, indent=2)},
-        ]
+        return build_teacher_messages(source, extraction, target_assembly, truncate=False)
 
     def analyze(self, source: SourceRecord, extraction: ExtractionResult, *, target_assembly: str = "x86-64") -> AnalysisRecord:
         payload = {

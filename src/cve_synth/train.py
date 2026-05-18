@@ -69,80 +69,87 @@ def load_jsonl_dataset(jsonl_path: str | Path) -> Dataset:
             except json.JSONDecodeError as e:
                 print(f"[WARN] Skipping malformed JSON line: {e}")
                 continue
-    
+
     print(f"[INFO] Loaded {len(data)} records from {jsonl_path}")
-    return Dataset.from_dict({"records": data})
+    return Dataset.from_list(data)
 
 
-def formatting_prompts_func(examples: dict[str, Any]) -> dict[str, list[str]]:
-    """
-    Format dataset records into Qwen chat templates with Chain-of-Thought structure.
-    
-    Expected input structure:
-    {
-      "analysis": {
-        "vulnerability_summary": "...",
-        "root_cause": "...",
-        "tags": ["#LogicError", ...],
-        "reasoning_chain": ["step 1", "step 2", ...],
-        "assembly_fix": "..."
-      },
-      "source": {
-        "title": "...",
-        "cve_id": "CVE-XXXX-XXXXX",
-        ...
-      }
+def _extract_training_fields(record: dict[str, Any]) -> dict[str, Any]:
+    analysis = record.get("analysis") if isinstance(record.get("analysis"), dict) else {}
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+
+    vulnerability_summary = record.get("vulnerability_summary") or analysis.get("vulnerability_summary") or ""
+    root_cause = record.get("root_cause") or analysis.get("root_cause") or ""
+    reasoning_chain = record.get("reasoning_chain") or analysis.get("reasoning_chain") or []
+    fix_strategy = record.get("fix_strategy") or analysis.get("fix_strategy") or ""
+    assembly_fix = record.get("assembly_fix") or analysis.get("assembly_fix") or ""
+    tags = record.get("tags") or analysis.get("tags") or []
+    vulnerable_snippet = record.get("vulnerable_snippet") or analysis.get("vulnerable_snippet") or "N/A"
+    cve_id = source.get("cve_id") or record.get("cve_id") or record.get("source_id") or "UNKNOWN"
+    title = source.get("title") or record.get("title") or "UNKNOWN"
+
+    return {
+        "vulnerability_summary": str(vulnerability_summary),
+        "root_cause": str(root_cause),
+        "reasoning_chain": [str(step) for step in reasoning_chain if str(step).strip()],
+        "fix_strategy": str(fix_strategy),
+        "assembly_fix": str(assembly_fix),
+        "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+        "vulnerable_snippet": str(vulnerable_snippet),
+        "cve_id": str(cve_id),
+        "title": str(title),
     }
-    """
-    texts = []
-    
-    # The dataset produced by cve_synth is flat (top-level fields), not nested under `analysis`.
-    # Support both flat and nested schemas for backward compatibility.
-    for record in examples.get("records", []):
-        # Prefer flat fields if present, otherwise fall back to nested `analysis` object
-        if "vulnerability_summary" in record:
-            vuln_summary = record.get("vulnerability_summary", "")
-            root_cause = record.get("root_cause", "")
-            tags = record.get("tags", []) or []
-            reasoning_chain = record.get("reasoning_chain", []) or []
-            assembly_fix = record.get("assembly_fix", "")
-            cve_id = record.get("cve_id", record.get("source_id", "UNKNOWN"))
-        else:
-            analysis = record.get("analysis", {})
-            vuln_summary = analysis.get("vulnerability_summary", "")
-            root_cause = analysis.get("root_cause", "")
-            tags = analysis.get("tags", []) or []
-            reasoning_chain = analysis.get("reasoning_chain", []) or []
-            assembly_fix = analysis.get("assembly_fix", "")
-            source = record.get("source", {})
-            cve_id = source.get("cve_id", record.get("source_id", "UNKNOWN"))
 
-        # Build prompt using Qwen's chat template: <|im_start|>...<|im_end|>
-        prompt = (
-            f"<|im_start|>user\n"
-            f"Analyze the following security vulnerability and provide a detailed reasoning process inside <thought> tags, then the final analysis.\n\n"
-            f"CVE ID: {cve_id}\n"
-            f"Summary: {vuln_summary}\n"
-            f"Root Cause Indication: {root_cause}\n"
-            f"<|im_end|>\n"
-        )
 
-        # Convert reasoning_chain list to bullet points inside <thought>
-        reasoning_text = "\n".join([f"- {step}" for step in reasoning_chain]) if reasoning_chain else "-"
-        tags_text = ", ".join(tags) if tags else "#Unknown"
+def format_for_student(record: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    fields = _extract_training_fields(record)
 
-        response = (
-            f"<|im_start|>assistant\n"
-            f"<thought>\n{reasoning_text}\n</thought>\n\n"
-            f"**Vulnerability Analysis:**\n"
-            f"- Classification Tags: {tags_text}\n"
-            f"- Assembly-level Fix:\n{assembly_fix}\n"
-            f"<|im_end|>"
-        )
+    system = (
+        "You are an expert security researcher and code reviewer. "
+        "Analyze the given vulnerability and provide a root cause analysis, a fix strategy, and the exact code fix in assembly or pseudo-code."
+    )
 
-        texts.append(prompt + response)
-    
-    return {"text": texts}
+    user = (
+        "VULNERABILITY REPORT:\n"
+        f"CVE ID: {fields['cve_id']}\n"
+        f"Title: {fields['title']}\n"
+        f"Summary: {fields['vulnerability_summary']}\n"
+        f"Root Cause: {fields['root_cause']}\n\n"
+        f"Vulnerable Snippet:\n{fields['vulnerable_snippet']}\n\n"
+        "Please provide:\n"
+        "1. Reasoning Chain\n"
+        "2. Fix Strategy\n"
+        "3. Assembly Fix Code"
+    )
+
+    reasoning = "\n".join(f"- {step}" for step in fields["reasoning_chain"]) if fields["reasoning_chain"] else "-"
+    tags_text = ", ".join(fields["tags"]) if fields["tags"] else "#Unknown"
+
+    assistant = (
+        "REASONING CHAIN:\n"
+        f"{reasoning}\n\n"
+        f"FIX STRATEGY:\n{fields['fix_strategy']}\n\n"
+        f"ASSEMBLY FIX:\n{fields['assembly_fix']}\n\n"
+        f"TAGS: {tags_text}"
+    )
+
+    return {
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+            {"role": "assistant", "content": assistant},
+        ]
+    }
+
+
+def formatting_prompts_func(record: dict[str, Any]) -> dict[str, str]:
+    sample = format_for_student(record)
+    messages = sample["messages"]
+    text = "".join(
+        f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+        for message in messages
+    )
+    return {"text": text}
 
 
 # ============================================================================
@@ -240,8 +247,6 @@ def train(
     print(f"\n[STEP 2] Formatting dataset with Chain-of-Thought prompts")
     formatted_dataset = dataset.map(
         formatting_prompts_func,
-        batched=True,
-        batch_size=64,
         remove_columns=dataset.column_names,
         desc="Formatting prompts",
     )

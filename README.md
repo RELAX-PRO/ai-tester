@@ -1,51 +1,96 @@
 # cve-synth
 
-Pipeline for turning CVE reports and GitHub security advisories into a structured JSONL fine-tuning dataset, with built-in support for fine-tuning student models (Gemma-2-9b-it) using Unsloth and LoRA.
+Pipeline for turning recent CVE and GitHub Security Advisory reports into a structured JSONL dataset for fine-tuning Qwen2.5-Coder-7B.
 
-## Status
+The pipeline now does three things end to end:
 
-This repository contains a complete pipeline for:
+1. Fetch recent NVD and GitHub advisory data into `data/raw/`.
+2. Filter the input down to memory-corruption-relevant reports.
+3. Send the surviving reports through an LLM teacher model and write the annotated dataset to `data/dataset.jsonl`.
 
-1. **Data Synthesis**: Ingest CVE reports → teacher model (Groq/DeepSeek) → structured JSONL dataset
-2. **Model Fine-Tuning**: Student model (Gemma-2-9b-it) on synthetic data using Unsloth + LoRA
+The training script then converts that JSONL into Qwen chat-format examples for student fine-tuning.
 
-Core features:
-- Canonical data models for CVE analysis
-- Incremental JSONL writer with checkpointing
-- Multi-key rate limiting for API providers
-- Teacher model client (Groq API)
-- Chain-of-Thought dataset formatting
-- Unsloth-optimized LoRA training for 16GB VRAM
+## What It Uses
+
+- Default teacher model: `openai/gpt-oss-120b` through Groq.
+- Optional teacher fallback: Gemini, then DeepSeek if configured.
+- Student model: `Qwen2.5-Coder-7B-Instruct`.
+- Dataset format: JSONL with `source`, `evidence_spans`, `analysis`, `quality_score`, and `tags`.
+
+## Environment
+
+Create a `.env` file in the project root with the keys you actually use:
+
+```env
+GROQ_API_KEYS=key1,key2,key3
+GEMINI_API_KEY=your_gemini_key
+GITHUB_TOKEN=your_github_token
+NVD_API_KEY=your_nvd_key
+```
+
+Optional legacy support:
+
+```env
+GROQ_API_KEY=single_key
+GEMINI_API_KEYS=key1,key2
+DEEPSEEK_API_KEY=legacy_key
+DEEPSEEK_API_KEYS=key1,key2
+```
+
+The loader reads `.env` from the current working directory first, then falls back to the project root.
+
+## Repository Layout
+
+- `src/cve_synth/fetch_data.py` downloads recent NVD CVEs and GitHub advisories.
+- `src/cve_synth/ingest.py` normalizes raw files into `SourceRecord` objects.
+- `src/cve_synth/extract.py` pulls vulnerable snippets and surrounding context.
+- `src/cve_synth/filtering.py` keeps only memory-corruption candidates.
+- `src/cve_synth/groq_client.py`, `src/cve_synth/gemini_client.py`, and `src/cve_synth/deepseek_client.py` handle teacher-model calls.
+- `src/cve_synth/pipeline.py` orchestrates filtering, analysis, checkpointing, quality gating, and JSONL writing.
+- `src/cve_synth/train.py` converts the dataset into Qwen2.5-Coder-7B training text.
 
 ## Quick Start
 
-### 1. Synthesize Dataset (Teacher Model)
+### 1. Fetch Raw Data
 
-#### Fetch raw CVE data:
 ```bash
 python -m cve_synth.fetch_data --output-dir data/raw
 ```
 
-#### Generate synthetic annotations (teacher model):
+This downloads normalized recent records into:
+
+- `data/raw/nvd_cve_recent.json`
+- `data/raw/github_security_advisories.json`
+
+### 2. Build the Dataset
+
+Run the main pipeline:
+
 ```bash
 python -m cve_synth.cli \
     --input-dir data/raw \
     --output data/dataset.jsonl \
-    --checkpoint data/checkpoint.json \
-    --api-keys-file groq_keys.txt \
-    --limit 100
+    --checkpoint data/checkpoint.json
 ```
 
-This creates `data/dataset.jsonl` with structured CVE analysis (1304+ records in your current setup).
+Behavior:
 
-### 2. Fine-Tune Student Model (Gemma-2-9b-it)
+- Memory-corruption-relevant records are kept.
+- Records already processed in the checkpoint are skipped.
+- Groq is the default teacher backend with model `openai/gpt-oss-120b`.
+- Gemini is tried when configured, and DeepSeek remains a legacy fallback.
+- Every accepted record is appended to `data/dataset.jsonl`.
 
-#### Install training dependencies:
+### 3. Fine-Tune Qwen2.5-Coder-7B
+
+Install the training extras:
+
 ```bash
 pip install -e ".[train]"
 ```
 
-#### Run training (defaults optimized for 16GB VRAM):
+Run training:
+
 ```bash
 python -m cve_synth.train \
     --dataset-path data/dataset.jsonl \
@@ -55,22 +100,58 @@ python -m cve_synth.train \
     --gradient-accumulation-steps 4
 ```
 
-#### Verify setup before training:
+Before training, you can sanity-check the dataset and environment:
+
 ```bash
 python verify_training_setup.py
 ```
 
-See [TRAINING_GUIDE.md](TRAINING_GUIDE.md) for detailed configuration and troubleshooting.
+## Provider Selection
 
-## Run (Legacy - Teacher Model Only)
+The CLI accepts a provider order via `--provider-priority`.
 
-```bash
-python -m cve_synth.cli --input-dir data/raw --output data/dataset.jsonl --checkpoint data/checkpoint.json
-```
-
-## Small-Scale Synthesis
+Examples:
 
 ```bash
-python -m cve_synth.cli --input-dir data/raw --output data/dataset.jsonl --checkpoint data/checkpoint.json --limit 10
+python -m cve_synth.cli --provider-priority groq,gemini,deepseek
+python -m cve_synth.cli --provider-priority gemini,groq
 ```
 
+If the first provider fails or is rate limited, the pipeline falls back to the next configured provider automatically.
+
+## Output Schema
+
+Each dataset record contains:
+
+- source metadata
+- extracted evidence spans
+- `analysis.vulnerability_summary`
+- `analysis.root_cause`
+- `analysis.reasoning_chain`
+- `analysis.fix_strategy`
+- `analysis.assembly_fix`
+- `analysis.tags`
+- `analysis.confidence`
+
+The trainer converts that into this student-facing structure:
+
+```text
+System: expert security researcher and code reviewer
+User: CVE ID, summary, root cause, vulnerable snippet
+Assistant: reasoning chain, fix strategy, assembly fix, tags
+```
+
+## Helpful Commands
+
+```bash
+python -m cve_synth.fetch_data --help
+python -m cve_synth.cli --help
+python -m cve_synth.train --help
+```
+
+## Notes
+
+- The pipeline is intentionally conservative. It only keeps strong memory-corruption indicators.
+- Groq remains the default model path because it matches the existing `openai/gpt-oss-120b` setup.
+- Gemini support is optional and uses the Google Generative Language API.
+- The training script expects the dataset produced by this pipeline, not raw CVE JSON.
